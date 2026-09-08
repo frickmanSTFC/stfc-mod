@@ -213,6 +213,7 @@ public:
 
   bool yeomanBattleJournals;
   int  yeomanBattleJournalDays;
+  std::string yeomanExe;
   SyncConfig sync_options;
 
   std::map<std::string, SyncTargetConfig> sync_targets;

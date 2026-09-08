@@ -19,6 +19,8 @@
 #include <spdlog/spdlog.h>
 #include <spud/detour.h>
 
+#include <Windows.h>
+
 #include <algorithm>
 #include <cstring>
 #include <chrono>
@@ -1148,8 +1150,30 @@ static void InstallImageMapHook()
   SPUD_STATIC_DETOUR(ptr, DownloadCacheManager_GenerateFilenameFromURL_Hook);
 }
 
+// Start Yeoman.exe at game start when Yeoman has written its path into [yeoman] exe.
+// ponytail: no running-check here; Yeoman exits on its own when its port is already taken.
+static void LaunchYeoman()
+{
+  const auto& exe = Config::Get().yeomanExe;
+  if (exe.empty()) {
+    return;
+  }
+  if (!std::filesystem::exists(exe)) {
+    spdlog::warn("Yeoman: exe not found, not starting it: {}", exe);
+    return;
+  }
+  auto dir = std::filesystem::path(exe).parent_path().string();
+  auto r   = (INT_PTR)ShellExecuteA(nullptr, "open", exe.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
+  if (r > 32) {
+    spdlog::info("Yeoman: started {}", exe);
+  } else {
+    spdlog::warn("Yeoman: could not start {} (error {})", exe, r);
+  }
+}
+
 void InstallFleetExportHooks()
 {
+  LaunchYeoman();
   InstallImageMapHook();
   auto helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Client.UI", "ScreenManager");
   if (!helper.isValidHelper()) {

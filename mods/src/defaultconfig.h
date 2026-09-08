@@ -86,6 +86,7 @@ namespace Yeoman
 {
   constexpr bool battlejournals     = true;   // save one JSON file per battle for the Yeoman viewer
   constexpr int  battlejournal_days = 30;     // delete saved journals older than this at start-up (0 = keep all)
+  constexpr const char* exe          = "";     // full path of Yeoman.exe; launched at game start when set
 } // namespace Yeoman
 
 namespace Shortcuts

@@ -927,6 +927,7 @@ void Config::Load()
       get_config_or_default(config, parsed, "yeoman", "battlejournals", DCY::battlejournals, write_config);
   this->yeomanBattleJournalDays =
       get_config_or_default(config, parsed, "yeoman", "battlejournal_days", DCY::battlejournal_days, write_config);
+  this->yeomanExe = get_config_or_default<std::string>(config, parsed, "yeoman", "exe", DCY::exe, write_config);
 
   SyncConfig sync_defaults;
   sync_defaults.proxy      = get_config_or_default<std::string>(config, parsed, "sync", "proxy", DCS::proxy, write_log);
