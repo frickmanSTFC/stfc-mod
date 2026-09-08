@@ -222,6 +222,7 @@ loadingscreenhooks = true
 miscpatches = true
 objecttracker = true
 officersorthooks = true
+fleetexporthooks = true
 panhooks = true
 resolutionlistfix = false
 syncpatches = true

@@ -79,7 +79,14 @@ namespace Patches
   constexpr bool focussearch                = true;
   constexpr bool cargoformathooks           = true;  // on by default: cargo number precision override
   constexpr bool officersorthooks           = true;  // restore Below Deck Ability sort option
+  constexpr bool fleetexporthooks           = true;  // write community_patch_fleets.json every 3s
 } // namespace Patches
+
+namespace Yeoman
+{
+  constexpr bool battlejournals     = true;   // save one JSON file per battle for the Yeoman viewer
+  constexpr int  battlejournal_days = 30;     // delete saved journals older than this at start-up (0 = keep all)
+} // namespace Yeoman
 
 namespace Shortcuts
 {

@@ -1,6 +1,8 @@
 #include "config.h"
 #include "errormsg.h"
 #include "file.h"
+#include "patches/parts/spec_ids.h"
+#include "patches/parts/milestones.h"
 #include "str_utils.h"
 
 #include <Digit.PrimeServer.Models.pb.h>
@@ -490,11 +492,15 @@ static std::shared_ptr<cpr::Session> get_curl_client_scopely()
   return session;
 }
 
-static std::string get_scopely_data(const std::string& path, const std::string& post_data)
+// require_sync_target=false is for reads we do for the local logs only: they go to the game's own
+// server with the player's own session, exactly as the game does when it opens a battle report,
+// and must not depend on an upload target being configured.
+static std::string get_scopely_data(const std::string& path, const std::string& post_data,
+                                    bool require_sync_target = true)
 {
   static std::once_flag emit_warning;
 
-  if (Config::Get().sync_targets.empty()) {
+  if (require_sync_target && Config::Get().sync_targets.empty()) {
     std::call_once(emit_warning, [] {
       logging::warn(logging::CURL_TYPE_UPLOAD, "GLOBAL", "No target found, will not attempt to retrieve data");
     });
@@ -938,10 +944,11 @@ static void ship_combat_log_data()
       http::logging::trace("PROCESS", "combat log", STR_FORMAT("Fetching combat log for battle {}", journal_id));
 
       const json journals_body{{"journal_id", journal_id}};
-      auto       battle_log = http::get_scopely_data("/journals/get", journals_body.dump());
+      auto       battle_log = http::get_scopely_data("/journals/get", journals_body.dump(), false);
       json       battle_json;
 
       if (battle_log.empty()) {
+        spdlog::warn("Battle journal {}: game server returned nothing", journal_id);
         continue;
       }
 
@@ -972,7 +979,7 @@ static void ship_combat_log_data()
         if (fetch_count > 0) {
           http::logging::trace("PROCESS", "combat log", STR_FORMAT("Fetching {} player profiles", fetch_count));
 
-          auto profiles      = http::get_scopely_data("/user_profile/profiles", profiles_request.dump());
+          auto profiles      = http::get_scopely_data("/user_profile/profiles", profiles_request.dump(), false);
           auto profiles_json = json::parse(profiles);
 
           std::scoped_lock lk(player_data_cache_mtx);
@@ -1003,7 +1010,7 @@ static void ship_combat_log_data()
         if (fetch_count > 0) {
           http::logging::trace("PROCESS", "combat log", STR_FORMAT("Fetching {} alliance profiles", fetch_count));
 
-          auto profiles      = http::get_scopely_data("/alliance/get_alliances_public_info", alliances_request.dump());
+          auto profiles      = http::get_scopely_data("/alliance/get_alliances_public_info", alliances_request.dump(), false);
           auto profiles_json = json::parse(profiles);
 
           std::scoped_lock lk(alliance_data_cache_mtx);
@@ -1036,6 +1043,55 @@ static void ship_combat_log_data()
             }
           }
         }
+      }
+
+      // Queue every officer and faction that fought, so fleet_export can turn the ids into names.
+      for (const auto* side : {&target_fleet_data, &initiator_fleet_data}) {
+        if (side->contains("faction_id") && (*side)["faction_id"].is_number()) {
+          spec_ids::add("faction", (*side)["faction_id"].get<int64_t>());
+        }
+        if (!side->contains("bridge_officers") || !(*side)["bridge_officers"].is_array()) {
+          continue;
+        }
+        for (const auto& officer : (*side)["bridge_officers"]) {
+          if (officer.contains("id")) {
+            spec_ids::add("officer", officer["id"].get<int64_t>());
+          }
+        }
+      }
+
+      // Local copy first: one file per battle, plus a one-line index the viewer reads.
+      // [yeoman] battlejournals turns this off; battlejournal_days prunes old ones at start-up.
+      if (Config::Get().yeomanBattleJournals) try {
+        const std::string file = STR_FORMAT("battles/{}.json", journal_id);
+        const std::string path(File::ExportPath(file));
+        // File::MakePath's create_dir flag is a no-op on Windows, so make the folder here.
+        std::error_code dir_ec;
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path(), dir_ec);
+        const json        record{{"id", journal_id}, {"names", names}, {"journal", battle_json["journal"]}};
+        {
+          std::ofstream f(path, std::ios::trunc);
+          if (!f) {
+            spdlog::error("Battle journal {}: cannot write {}", journal_id, path);
+          }
+          f << record.dump();
+        }
+
+        const auto ts = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+        static std::mutex index_mtx;
+        std::scoped_lock  lk(index_mtx);
+        std::ofstream     idx(std::string(File::ExportPath("community_patch_battles.jsonl")), std::ios::app);
+        if (idx) {
+          idx << json{{"t", ts}, {"id", journal_id}}.dump() << "\n";
+        }
+      } catch (const std::exception& e) {
+        spdlog::error("Failed to write battle journal {}: {}", journal_id, e.what());
+      }
+
+      if (!Config::Get().sync_options.battlelogs) {
+        continue;
       }
 
       auto battle_array = json::array();
@@ -1188,12 +1244,13 @@ static void starbase_modules(std::unique_ptr<std::string>&& bytes)
       for (const auto& module : response.modulestates()) {
         if (const auto& it = module_states.find(module.id()); it == module_states.end() || it->second != module.level()) {
           module_states[module.id()] = module.level();
+          milestones::record("building", module.id(), module.level());
           starbase_array.push_back({{"type", SyncConfig::Type::Buildings}, {"bid", module.id()}, {"level", module.level()}});
         }
       }
     }
 
-    if (!starbase_array.empty()) {
+    if (!starbase_array.empty() && Config::Get().sync_options.buildings) {
       workers::queue_data(SyncConfig::Type::Buildings, starbase_array);
     }
   } else {
@@ -1468,17 +1525,160 @@ static void research_trees_state(std::unique_ptr<std::string>&& bytes)
       for (const auto& [id, level] : response.researchprojectlevels()) {
         if (const auto& it = research_states.find(id); it == research_states.end() || it->second != level) {
           research_states[id] = level;
+          milestones::record("research", id, level);
           research_array.push_back({{"type", SyncConfig::Type::Research}, {"rid", id}, {"level", level}});
         }
       }
     }
 
-    if (!research_array.empty()) {
+    if (!research_array.empty() && Config::Get().sync_options.research) {
       workers::queue_data(SyncConfig::Type::Research, research_array);
     }
   } else {
     spdlog::error("Failed to parse research trees state");
   }
+}
+
+// ponytail: append-only JSONL loot log, one line per resource change. The viewer does all the
+// maths (daily totals, trends). The raw server value goes in "v" with the payload kind in "src",
+// so the page's reading of it can be corrected without another game restart.
+// No rotation; add one if the file ever gets big enough to notice.
+static void record_loot(int64_t id, int64_t value, int64_t prev, bool had_prev, const char* src)
+{
+  static std::mutex file_mtx;
+
+  const std::string path(File::ExportPath("community_patch_loot.jsonl"));
+  const auto        ts = std::chrono::duration_cast<std::chrono::seconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count();
+
+  spec_ids::add("resource", id);
+
+  std::scoped_lock lk(file_mtx);
+  std::ofstream    f(path, std::ios::app);
+  if (!f) {
+    return;
+  }
+  f << "{\"t\":" << ts << ",\"src\":\"" << src << "\",\"id\":" << id << ",\"v\":" << value;
+  if (had_prev) {
+    f << ",\"prev\":" << prev;
+  }
+  f << "}\n";
+}
+
+// The server's full ship catalogue. Written once per session so the milestone log's hull ids can
+// be shown as ship names — including ships that never leave the hangar, which a fleet snapshot
+// would never see.
+// Every ship module the server knows about, so a component id in the milestone log can be shown
+// as "Isolytic Cannon, tier 9" instead of a number.
+static void component_specs(std::unique_ptr<std::string>&& bytes)
+{
+  using json = nlohmann::json;
+
+  static json       catalogue = json::object();
+  static std::mutex catalogue_mtx;
+
+  auto add = [](int64_t id, const Digit::PrimeServer::Models::ComponentSpec& spec) {
+    if (id == 0 || spec.name().empty()) {
+      return;
+    }
+    std::scoped_lock lk(catalogue_mtx);
+    catalogue[std::to_string(id)] = {{"name", spec.name()},
+                                     {"tier", spec.tier()},
+                                     {"grade", spec.grade()},
+                                     {"type", static_cast<int>(spec.type())},
+                                     {"rarity", static_cast<int>(spec.rarity())},
+                                     {"loca_id", spec.idrefs().locaid()}};
+    if (spec.idrefs().locaid()) {
+      spec_ids::add("component_loca", spec.idrefs().locaid());
+    }
+  };
+
+  if (auto one = Digit::PrimeServer::Models::ComponentSpec(); one.ParseFromString(*bytes) && !one.name().empty()) {
+    add(one.id(), one);
+  } else if (auto response = Digit::PrimeServer::Models::ComponentSpecResponse(); response.ParseFromString(*bytes)) {
+    for (const auto& [id, spec] : response.componentspecs()) {
+      add(id, spec);
+    }
+  } else {
+    spdlog::error("Failed to parse component specs");
+    return;
+  }
+
+  static size_t    last_written = 0;
+  std::scoped_lock lk(catalogue_mtx);
+  if (catalogue.size() == last_written) {
+    return;
+  }
+  last_written = catalogue.size();
+
+  const std::string path(File::ExportPath("community_patch_components.json"));
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream f(tmp, std::ios::trunc);
+    f << catalogue.dump(2);
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, path, ec);
+  spdlog::info("Sync: community_patch_components.json has {} modules", catalogue.size());
+}
+
+static void hull_specs(std::unique_ptr<std::string>&& bytes)
+{
+  using json = nlohmann::json;
+
+  // The catalogue arrives spread over many messages, and a group sometimes holds a bare HullSpec
+  // rather than the map wrapper, so accumulate instead of overwriting.
+  static json       catalogue = json::object();
+  static std::mutex catalogue_mtx;
+
+  auto add = [](int64_t id, const Digit::PrimeServer::Models::HullSpec& spec) {
+    if (id == 0 || spec.name().empty()) {
+      return;
+    }
+    std::scoped_lock lk(catalogue_mtx);
+    catalogue[std::to_string(id)] = {{"name", spec.name()},
+                                     {"grade", spec.grade()},
+                                     {"type", static_cast<int>(spec.type())},
+                                     {"rarity", static_cast<int>(spec.rarity())},
+                                     {"max_tier", spec.tiermax()},
+                                     {"loca_id", spec.idrefs().locaid()}};
+    if (spec.idrefs().locaid()) {
+      spec_ids::add("hull_loca", spec.idrefs().locaid());
+    }
+  };
+
+  if (auto one = Digit::PrimeServer::Models::HullSpec(); one.ParseFromString(*bytes) && !one.name().empty()) {
+    add(one.id(), one);
+  } else if (auto response = Digit::PrimeServer::Models::StaticSyncHullSpecsResponse();
+             response.ParseFromString(*bytes)) {
+    http::logging::trace("PROCESS", "hull specs", STR_FORMAT("Processing {} hulls", response.hullspecs_size()));
+
+    for (const auto& [id, spec] : response.hullspecs()) {
+      add(id, spec);
+    }
+
+  } else {
+    spdlog::error("Failed to parse hull specs");
+    return;
+  }
+
+  static size_t     last_written = 0;
+  std::scoped_lock  lk(catalogue_mtx);
+  if (catalogue.size() == last_written) {
+    return;
+  }
+  last_written = catalogue.size();
+
+  const std::string path(File::ExportPath("community_patch_hulls.json"));
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream f(tmp, std::ios::trunc);
+    f << catalogue.dump(2);
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, path, ec);
+  spdlog::info("Sync: community_patch_hulls.json has {} ships", catalogue.size());
 }
 
 static void resources(std::unique_ptr<std::string>&& bytes)
@@ -1495,16 +1695,22 @@ static void resources(std::unique_ptr<std::string>&& bytes)
     {
       std::scoped_lock lk(resource_states_mtx);
 
+      const bool baseline = is_first_sync.load(std::memory_order_acquire);
+
       for (const auto& resource : response.resources()) {
-        if (const auto& it = resource_states.find(resource.id()); it == resource_states.end() || it->second != resource.currentamount()) {
+        const auto&   it       = resource_states.find(resource.id());
+        const bool    had_prev = it != resource_states.end();
+        const int64_t prev     = had_prev ? it->second : 0;
+        if (!had_prev || prev != resource.currentamount()) {
           resource_states[resource.id()] = resource.currentamount();
+          record_loot(resource.id(), resource.currentamount(), prev, had_prev, baseline ? "base" : "full");
           resource_array.push_back({{"type", SyncConfig::Type::Resources}, {"rid", resource.id()}, {"amount", resource.currentamount()}});
         }
       }
     }
 
-    if (!resource_array.empty()) {
-      const bool first_sync = is_first_sync.exchange(false, std::memory_order_acq_rel);
+    const bool first_sync = is_first_sync.exchange(false, std::memory_order_acq_rel);
+    if (!resource_array.empty() && Config::Get().sync_options.resources) {
       workers::queue_data(SyncConfig::Type::Resources, resource_array, first_sync);
     }
   } else {
@@ -1526,14 +1732,18 @@ static void resources_delta(std::unique_ptr<std::string>&& bytes)
       std::scoped_lock lk(resource_states_mtx);
 
       for (const auto& resource : response.resources()) {
-        if (const auto& it = resource_states.find(resource.id()); it == resource_states.end() || it->second != resource.amount()) {
+        const auto&   it       = resource_states.find(resource.id());
+        const bool    had_prev = it != resource_states.end();
+        const int64_t prev     = had_prev ? it->second : 0;
+        if (!had_prev || prev != resource.amount()) {
           resource_states[resource.id()] = resource.amount();
+          record_loot(resource.id(), resource.amount(), prev, had_prev, "delta");
           resource_array.push_back({{"type", SyncConfig::Type::Resources}, {"rid", resource.id()}, {"amount", resource.amount()}});
         }
       }
     }
 
-    if (!resource_array.empty()) {
+    if (!resource_array.empty() && Config::Get().sync_options.resources) {
       workers::queue_data(SyncConfig::Type::Resources, resource_array);
     }
 
@@ -1911,12 +2121,13 @@ namespace json
 
         if (const auto& it = module_states.find(id); it == module_states.end() || it->second != level) {
           module_states[id] = level;
+          milestones::record("building", id, level);
           starbase_array.push_back({{"type", SyncConfig::Type::Buildings}, {"bid", id}, {"level", level}});
         }
       }
     }
 
-    if (!starbase_array.empty()) {
+    if (!starbase_array.empty() && Config::Get().sync_options.buildings) {
       workers::queue_data(SyncConfig::Type::Buildings, starbase_array);
     }
   }
@@ -1944,6 +2155,30 @@ namespace json
         const auto      components       = ship["components"].get<std::vector<int64_t>>();
         const ShipState state{tier, level, level_percentage, components};
 
+        // Milestones track tier and level only: ShipState also carries level_percentage, which
+        // moves with every scrap of ship xp, and it keeps its fields private.
+        static std::unordered_map<int64_t, std::pair<int32_t, int32_t>> ship_marks;
+        const auto& mark = ship_marks.find(id);
+        if (mark == ship_marks.end() || mark->second.first != tier) {
+          milestones::record("ship_tier", id, tier);
+        }
+        if (mark == ship_marks.end() || mark->second.second != level) {
+          milestones::record("ship_level", id, level);
+        }
+        ship_marks[id] = {tier, level};
+        static std::unordered_set<int64_t> hull_marked;
+        if (hull_marked.insert(id).second) {
+          milestones::record("ship_hull", id, ship["hull_id"].get<int64_t>());
+        }
+
+        // Fitted modules. Written whole so the viewer can diff one reading against the next and
+        // name the module that changed; the first reading of a ship is only a starting point.
+        static std::unordered_map<int64_t, std::vector<int64_t>> component_marks;
+        if (const auto& cm = component_marks.find(id); cm == component_marks.end() || cm->second != components) {
+          component_marks[id] = components;
+          milestones::record_json("ship_components", id, components);
+        }
+
         if (const auto& it = ship_states.find(id); it == ship_states.end() || it->second != state) {
           ship_states[id] = state;
           ship_array.push_back({{"type", SyncConfig::Type::Ships},
@@ -1957,8 +2192,8 @@ namespace json
       }
     }
 
-    if (!ship_array.empty()) {
-      const bool first_sync = is_first_sync.exchange(false, std::memory_order_acq_rel);
+    const bool first_sync = is_first_sync.exchange(false, std::memory_order_acq_rel);
+    if (!ship_array.empty() && Config::Get().sync_options.ships) {
       workers::queue_data(SyncConfig::Type::Ships, ship_array, first_sync);
     }
   }
@@ -1973,10 +2208,7 @@ namespace json
 
       for (const auto& [key, section] : result.items()) {
         if (key == "battle_result_headers") {
-          if (!sync_options.battlelogs) {
-            continue;
-          }
-
+          // always processed: see above
           battle_result_headers(section);
 
         } else if (key == "resources") {
@@ -1987,17 +2219,11 @@ namespace json
           resources(section);
 
         } else if (key == "starbase_modules") {
-          if (!sync_options.buildings) {
-            continue;
-          }
-
+          // always processed: the local milestone log does not depend on the upload switches
           starbase_modules(section);
 
         } else if (key == "ships") {
-          if (!sync_options.ships) {
-            continue;
-          }
-
+          // always processed: the local milestone log does not depend on the upload switches
           ships(section);
         }
       }
@@ -2150,24 +2376,20 @@ static void HandleEntityGroup(EntityGroup* entity_group)
   switch (entity_group->Type_) {
     // battlelogs
     case EntityGroup::Type::BattleResultHeaders:
-      if (sync_options.battlelogs) {
-        submit_async(processors::battle_result_headers);
-      }
+      // always processed: battle journals are written locally regardless of the upload switch
+      submit_async(processors::battle_result_headers);
       break;
     case EntityGroup::Type::BattleReport:
-      if (sync_options.battlelogs) {
-        submit_async(processors::battle_report);
-      }
+      // always processed: battle journals are written locally regardless of the upload switch
+      submit_async(processors::battle_report);
       break;
     case EntityGroup::Type::UserProfiles:
-      if (sync_options.battlelogs) {
-        submit_async(trackers::names::cache_player_names);
-      }
+      // always processed: battle journals are written locally regardless of the upload switch
+      submit_async(trackers::names::cache_player_names);
       break;
     case EntityGroup::Type::AllianceProfiles:
-      if (sync_options.battlelogs) {
-        submit_async(trackers::names::cache_alliance_names);
-      }
+      // always processed: battle journals are written locally regardless of the upload switch
+      submit_async(trackers::names::cache_alliance_names);
       break;
 
     // buffs
@@ -2184,9 +2406,8 @@ static void HandleEntityGroup(EntityGroup* entity_group)
 
     // buildings
     case EntityGroup::Type::StarbaseModules:
-      if (sync_options.buildings) {
-        submit_async(processors::starbase_modules);
-      }
+      // always processed: the local milestone log does not depend on the sync upload being enabled
+      submit_async(processors::starbase_modules);
       break;
 
     // inventory
@@ -2224,21 +2445,26 @@ static void HandleEntityGroup(EntityGroup* entity_group)
 
     // research
     case EntityGroup::Type::ResearchTreesState:
-      if (sync_options.research) {
-        submit_async(processors::research_trees_state);
-      }
+      // always processed: the local milestone log does not depend on the sync upload being enabled
+      submit_async(processors::research_trees_state);
+      break;
+
+    // ships
+    case EntityGroup::Type::ComponentSpecs:
+      submit_async(processors::component_specs);
+      break;
+    case EntityGroup::Type::HullSpecs:
+      submit_async(processors::hull_specs);
       break;
 
     // resources
     case EntityGroup::Type::Resources:
-      if (sync_options.resources) {
-        submit_async(processors::resources);
-      }
+      // always processed: the local loot log does not depend on the sync upload being enabled
+      submit_async(processors::resources);
       break;
     case EntityGroup::Type::ResourcesDelta:
-      if (sync_options.resources) {
-        submit_async(processors::resources_delta);
-      }
+      // always processed: the local loot log does not depend on the sync upload being enabled
+      submit_async(processors::resources_delta);
       break;
     case EntityGroup::Type::AllianceGetBankResources:
       if (sync_options.resources) {
@@ -2435,6 +2661,61 @@ void InstallSyncPatches()
         SPUD_STATIC_DETOUR(ptr, hooks::RtcParser_ParseFinalPayload);
       }
     }
+
+  // Officer ids are queued for naming when a journal is fetched, but journals already on disk were
+  // fetched before that existed. Sweep them once at startup so old battles get names too.
+  std::thread([] {
+    using json = nlohmann::json;
+    const std::filesystem::path folder = std::filesystem::path(std::string(File::ExportPath("battles")));
+    std::error_code             ec;
+    if (!std::filesystem::is_directory(folder, ec)) {
+      return;
+    }
+    // Retention: drop journals older than [yeoman] battlejournal_days (0 keeps everything).
+    const int keep_days = Config::Get().yeomanBattleJournalDays;
+    if (keep_days > 0) {
+      const auto cutoff  = std::filesystem::file_time_type::clock::now() - std::chrono::hours(24) * keep_days;
+      size_t     removed = 0;
+      for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
+        if (entry.path().extension() == ".json" && entry.last_write_time(ec) < cutoff) {
+          removed += std::filesystem::remove(entry.path(), ec) ? 1 : 0;
+        }
+      }
+      if (removed) {
+        spdlog::info("Sync: removed {} battle journals older than {} days", removed, keep_days);
+      }
+    }
+    size_t found = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
+      if (entry.path().extension() != ".json") {
+        continue;
+      }
+      try {
+        std::ifstream f(entry.path());
+        const auto    d = json::parse(f);
+        for (const char* side : {"initiator_fleet_data", "target_fleet_data"}) {
+          const auto& fleet = d["journal"][side];
+          if (fleet.contains("faction_id") && fleet["faction_id"].is_number()) {
+            spec_ids::add("faction", fleet["faction_id"].get<int64_t>());
+          }
+          if (!fleet.contains("bridge_officers") || !fleet["bridge_officers"].is_array()) {
+            continue;
+          }
+          for (const auto& officer : fleet["bridge_officers"]) {
+            if (officer.is_object() && officer.contains("id")) {
+              spec_ids::add("officer", officer["id"].get<int64_t>());
+              ++found;
+            }
+          }
+        }
+      } catch (const std::exception&) {
+        // a half-written journal is not worth complaining about
+      }
+    }
+    if (found) {
+      spdlog::info("Sync: queued {} officer slots from saved battle journals", found);
+    }
+  }).detach();
 
   std::thread(workers::ship_sync_data).detach();
   std::thread(workers::ship_combat_log_data).detach();

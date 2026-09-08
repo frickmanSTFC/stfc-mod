@@ -222,6 +222,7 @@ loadingscreenhooks = true
 miscpatches = true
 objecttracker = true
 officersorthooks = true
+fleetexporthooks = true
 panhooks = true
 resolutionlistfix = false
 syncpatches = true
@@ -675,6 +676,14 @@ auto_confirm_discovery = true
 #       ****    ***   *  *    ***           ***   *       **      *     ***   *  *   ***
 #
 #  <[========================================================================================]>
+
+[yeoman]
+
+# Save one JSON file per battle in <game>\yeoman\battles for the Yeoman viewer?
+battlejournals = true
+
+# Delete saved battle journals older than this many days when the game starts (0 keeps all)
+battlejournal_days = 30
 
 [sync]
 

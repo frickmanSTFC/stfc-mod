@@ -19,6 +19,7 @@
 #include <string_view>
 
 namespace DCP  = DefaultConfig::Patches;
+namespace DCY  = DefaultConfig::Yeoman;
 namespace DCG  = DefaultConfig::Graphics;
 namespace DCC  = DefaultConfig::Control;
 namespace DCU  = DefaultConfig::UI;
@@ -778,6 +779,8 @@ void Config::Load()
       get_config_or_default(config, parsed, "patches", "focussearch", DCP::focussearch, write_config);
   this->installCargoFormatHooks =
       get_config_or_default(config, parsed, "patches", "cargoformathooks", DCP::cargoformathooks, write_config);
+  this->installFleetExportHooks =
+      get_config_or_default(config, parsed, "patches", "fleetexporthooks", DCP::fleetexporthooks, write_config);
   this->installOfficerSortHooks =
       get_config_or_default(config, parsed, "patches", "officersorthooks", DCP::officersorthooks, write_config);
   spdlog::debug("");
@@ -919,6 +922,11 @@ void Config::Load()
   this->sync_logging = get_config_or_default(config, parsed, "sync", "logging", DCS::logging, write_config);
   this->sync_resolver_cache_ttl =
       get_config_or_default(config, parsed, "sync", "resolver_cache_ttl", DCS::resolver_cache_ttl, write_config);
+
+  this->yeomanBattleJournals =
+      get_config_or_default(config, parsed, "yeoman", "battlejournals", DCY::battlejournals, write_config);
+  this->yeomanBattleJournalDays =
+      get_config_or_default(config, parsed, "yeoman", "battlejournal_days", DCY::battlejournal_days, write_config);
 
   SyncConfig sync_defaults;
   sync_defaults.proxy      = get_config_or_default<std::string>(config, parsed, "sync", "proxy", DCS::proxy, write_log);

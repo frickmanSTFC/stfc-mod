@@ -1,3 +1,5 @@
+#pragma once
+
 #include "config.h"
 #include "patches/mapkey.h"
 #include "prime/KeyCode.h"
@@ -30,6 +32,8 @@
 #define FILE_DEF_BL "patch_battlelogs_sent.json"
 #define FILE_DEF_PARSED "community_patch_settings_parsed.toml"
 #define FILE_DEF_TITLE L"Star Trek Fleet Command"
+// Yeoman: everything our export patches write lives in <game>\yeoman\ so the viewer reads one folder.
+#define FILE_DEF_EXPORT_DIR "yeoman"
 
 #define FILE_EXT_TOML ".toml"
 #define FILE_EXT_VARS ".vars"
@@ -55,6 +59,15 @@ public:
 #else
   static std::u8string MakePath(std::string_view filename, bool create_dir = false, bool old_path = false);
 #endif
+
+  // Path of an export file inside FILE_DEF_EXPORT_DIR; makes the folder on first use.
+  static std::string ExportPath(std::string_view filename)
+  {
+    const std::filesystem::path dir = std::filesystem::path(std::string(MakePath(FILE_DEF_EXPORT_DIR)));
+    static const bool           made = [&] { std::error_code ec; std::filesystem::create_directories(dir, ec); return true; }();
+    (void) made;
+    return (dir / filename).string();
+  }
 
 private:
   static std::filesystem::path Path();

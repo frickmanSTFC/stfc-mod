@@ -210,6 +210,9 @@ public:
   bool       sync_logging;
   bool       sync_debug;
   int        sync_resolver_cache_ttl;
+
+  bool yeomanBattleJournals;
+  int  yeomanBattleJournalDays;
   SyncConfig sync_options;
 
   std::map<std::string, SyncTargetConfig> sync_targets;
@@ -231,6 +234,7 @@ public:
   bool installObjectTracker;
   bool installGiftsBulkClaimHooks;
   bool installInstantWarpConfirmationHooks;
+  bool installFleetExportHooks;
 
   std::string config_settings_url;
   std::string config_assets_url_override;
