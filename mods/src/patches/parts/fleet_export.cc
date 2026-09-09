@@ -1206,7 +1206,7 @@ static void write_events()
       }
       std::string all;
       for (auto& c : loca_cats) all += c + " ";
-      spdlog::info("Events: loca categories [{}]", all);
+      spdlog::debug("Events: loca categories [{}]", all);
     }
   }
 
@@ -1239,27 +1239,8 @@ static void write_events()
     }
     e["loca"]     = loca;
     e["loca_str"] = loca_str;
-    e["name"]     = std::string();
-    {
-      const auto lid = std::to_string(loca);
-      std::vector<std::string> cats(loca_cats);
-      for (const char* c : {"events", "event", "tournaments", "missions", "loca"}) cats.push_back(c);
-      for (const auto& cat : cats) {
-        // the id is a 40-char content hash; the text key is most likely hash + a suffix
-        for (const auto& ident : {loca_str + "_name", loca_str + "_title", loca_str + "-name", loca_str + ".name",
-                                  "name_" + loca_str, "title_" + loca_str, loca_str + "_event_name", loca_str + "_short_name",
-                                  "event_name_" + loca_str, loca_str, "event_name_" + lid, lid}) {
-          if (ident.empty()) continue;
-          auto n = localize_one(cat, ident);
-          if (!n.empty()) {
-            e["name"] = n;
-            if (!logged_key) { spdlog::info("Events: name key shape is {}/{}", cat, ident); logged_key = true; }
-            break;
-          }
-        }
-        if (!e["name"].get<std::string>().empty()) break;
-      }
-    }
+    // event text lives in the "event" table under title_<content hash> (found 2026-09-08)
+    e["name"] = loca_str.empty() ? std::string() : localize_one("event", "title_" + loca_str);
 
     for (const char* f : {"IsCurrentlyActive", "IsActive", "IsComplete", "IsClaimable", "IsClosed", "IsReady",
                           "IsDailyGoalsEvent", "IsDailyMilestone", "IsBattlePass", "IsAchievement", "IsWarchestEvent",
@@ -1281,45 +1262,21 @@ static void write_events()
       e["start"]       = ticks_to_unix(prop_val<int64_t>(t, "StartTime"));
     }
 
+    // milestones: EventModel.Objectives is a list of EventReward, one per milestone, with the score
+    // it needs, the player's progress towards it, and whether its reward is ready or taken
     e["tiers"] = nlohmann::json::array();
-    for_each_list(prop_obj(ev, "Tiers"), [&](Il2CppObject* tier) {
-      nlohmann::json t;
-      t["score"] = prop_val<int64_t>(tier, "HighScore");
-      t["state"] = prop_val<int32_t>(tier, "CurrentState");   // 0 inactive 1 active 2 ready to collect 3 complete
-      if (auto pr = prop_obj(tier, "Progress")) {
-        t["cur"] = prop_val<double>(pr, "CurrentValue");
-        t["max"] = prop_val<double>(pr, "MaxValue");
-      }
-      e["tiers"].push_back(std::move(t));
-    });
-
-    e["objectives"] = nlohmann::json::array();
-    static bool logged_obj = false;
-    for_each_list(prop_obj(ev, "Objectives"), [&](Il2CppObject* o) {
+    for_each_list(prop_obj(ev, "Objectives"), [&](Il2CppObject* t) {
       nlohmann::json j;
-      if (!logged_obj) {   // learn what an event objective really is, once
-        auto cls = il2cpp_object_get_class(o);
-        std::string props;
-        void* iter = nullptr;
-        while (auto pr = il2cpp_class_get_properties(cls, &iter)) {
-          props += il2cpp_property_get_name((PropertyInfo*)pr); props += " ";
-        }
-        spdlog::info("Events: objective class {}.{} props [{}]", il2cpp_class_get_namespace(cls), il2cpp_class_get_name(cls), props);
-        logged_obj = true;
+      j["score"]     = prop_val<int64_t>(t, "HighScore");
+      j["low"]       = prop_val<int64_t>(t, "LowScore");
+      j["state"]     = prop_val<int32_t>(t, "State");        // TournamentTierState: 0 inactive 1 active 2 ready 3 complete
+      j["claimable"] = prop_val<bool>(t, "IsClaimable");
+      j["last"]      = prop_val<bool>(t, "IsLastTier");
+      if (auto pr = prop_obj_any(t, {"Digit.PrimeServer.Models.IMissionElement.Progress", "Progress"})) {
+        j["cur"] = prop_val<double>(pr, "CurrentValue");
+        j["max"] = prop_val<double>(pr, "MaxValue");
       }
-      if (auto pr = prop_obj(o, "Progress")) {
-        j["pcur"] = prop_val<double>(pr, "CurrentValue");
-        j["pmax"] = prop_val<double>(pr, "MaxValue");
-      }
-      j["value"]  = prop_val<double>(o, "CurrentValue");
-      j["tvalue"] = prop_val<double>(o, "TargetValue");
-      j["id"]        = prop_val<int64_t>(o, "Id");
-      j["type"]      = prop_val<int32_t>(o, "Type");
-      j["cur"]       = prop_val<int64_t>(o, "CurrentCounterValue");
-      j["target"]    = prop_val<int64_t>(o, "TargetCounterValue");
-      j["claimable"] = prop_val<bool>(o, "IsClaimable");
-      j["spec"]      = prop_val<int64_t>(o, "ObjectiveSpecId");
-      e["objectives"].push_back(std::move(j));
+      e["tiers"].push_back(std::move(j));
     });
 
     events.push_back(std::move(e));
