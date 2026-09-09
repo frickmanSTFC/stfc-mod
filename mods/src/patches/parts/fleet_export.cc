@@ -1100,15 +1100,9 @@ static void write_research_catalogue()
       if (auto ls = refs ? (Il2CppString*)prop_obj(refs, "LocaStringId") : nullptr) {
         loca_str = to_string(ls);
       }
-      // trees carry a text id; the game's own key is that string, tried in the research table first
-      t["name"] = loca_str.empty() ? std::string() : localize("research", loca_str);
-      if (t["name"].get<std::string>().empty()) {
-        for (const char* cat : {"research_trees", "research_tree", "buckets", "ui"}) {
-          auto n = loca_str.empty() ? std::string() : localize_one(cat, loca_str);
-          if (n.empty() && loca) n = localize_one(cat, "research_tree_name_" + std::to_string(loca));
-          if (!n.empty()) { t["name"] = n; break; }
-        }
-      }
+      // Tree names sit in the research table as research_tree_name_<LocaId> (found 2026-09-08).
+      // A bare number is never tried there: it answers with some project's name.
+      t["name"] = loca ? localize_one("research", "research_tree_name_" + std::to_string(loca)) : std::string();
       t["loca"]     = loca;
       t["loca_str"] = loca_str;
       t["type"]    = prop_val<int32_t>(tree, "Type");
