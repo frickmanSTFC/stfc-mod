@@ -951,6 +951,126 @@ static void note_hull(int64_t hull_id, const std::string& name)
   g_specs_dirty      = true;      // written once per tick, not once per name
 }
 
+// --- research catalogue -----------------------------------------------------------------------
+// Every research project the game knows, with max level and what each level needs and costs.
+// Written once per game start from SpecService.ResearchProjectSpecs / ResearchTreeSpecs; the
+// viewer pairs it with the levels in the milestones log to show done / available / locked.
+#define FILE_DEF_RESEARCH "community_patch_research.json"
+
+// Google.Protobuf RepeatedField<T>: T[] array + int count
+template <typename F> static void for_each_repeated(Il2CppObject* rf, F fn)
+{
+  auto array_p = (Il2CppArray**)field_ptr(rf, "array");
+  auto count_p = (int32_t*)field_ptr(rf, "count");
+  if (!array_p || !*array_p || !count_p) {
+    return;
+  }
+  auto arr = *array_p;
+  auto n   = std::min<int32_t>(*count_p, (int32_t)il2cpp_array_length(arr));
+  for (int32_t i = 0; i < n; ++i) {
+    fn(arr, i);
+  }
+}
+static Il2CppObject* rf_obj(Il2CppArray* arr, int32_t i) { return *(Il2CppObject**)il2cpp_array_addr_with_size(arr, i, sizeof(void*)); }
+static int64_t       rf_i64(Il2CppArray* arr, int32_t i) { return *(int64_t*)il2cpp_array_addr_with_size(arr, i, sizeof(int64_t)); }
+
+static void write_research_catalogue()
+{
+  static bool done = false;
+  if (done) {
+    return;
+  }
+  auto manager      = FleetsManager::Instance();
+  auto spec_service = manager ? (Il2CppObject*)spec_service_for(manager) : nullptr;
+  if (!spec_service) {
+    return;
+  }
+  auto projects_p = (Il2CppObject**)field_ptr(spec_service, "ResearchProjectSpecs");
+  auto trees_p    = (Il2CppObject**)field_ptr(spec_service, "ResearchTreeSpecs");
+  if (!projects_p || !*projects_p) {
+    return;
+  }
+
+  nlohmann::json out;
+  out["projects"] = nlohmann::json::object();
+  out["trees"]    = nlohmann::json::object();
+  int unnamed = 0;
+
+  for_each_dict_ll(*projects_p, [&](int64_t id, int64_t spec_ptr) {
+    auto spec = (Il2CppObject*)spec_ptr;
+    if (!spec) {
+      return;
+    }
+    nlohmann::json p;
+    p["tree"] = prop_val<int64_t>(spec, "ResearchTreeId");
+    auto refs = prop_obj(spec, "IdRefs");
+    auto loca = refs ? prop_val<int64_t>(refs, "LocaId") : 0;
+    p["name"] = loca ? localize("research", std::to_string(loca)) : std::string();
+    if (p["name"].get<std::string>().empty()) {
+      ++unnamed;
+    }
+    p["levels"] = nlohmann::json::array();
+    for_each_repeated(prop_obj(spec, "Levels"), [&](Il2CppArray* arr, int32_t i) {
+      auto lvl = rf_obj(arr, i);
+      if (!lvl) {
+        return;
+      }
+      nlohmann::json l;
+      l["time"]  = prop_val<int64_t>(lvl, "ResearchTimeInSeconds");
+      l["might"] = prop_val<int64_t>(lvl, "MilitaryMight");
+      l["req"]   = nlohmann::json::array();
+      for_each_repeated(prop_obj(lvl, "Requirements"), [&](Il2CppArray* ra, int32_t j) {
+        auto r = rf_obj(ra, j);
+        if (!r) {
+          return;
+        }
+        auto type = prop_val<int32_t>(r, "Type");
+        auto target = prop_val<int64_t>(r, "TargetId");
+        l["req"].push_back({type, target, prop_val<int64_t>(r, "Level")});
+        if (type == 1) spec_ids::add("building", target);
+      });
+      l["cost"] = nlohmann::json::array();
+      for_each_repeated(prop_obj(lvl, "Costs"), [&](Il2CppArray* ca, int32_t j) {
+        auto c = rf_obj(ca, j);
+        if (!c) {
+          return;
+        }
+        auto rid = prop_val<int64_t>(c, "ResourceId");
+        l["cost"].push_back({rid, prop_val<int64_t>(c, "Value")});
+        spec_ids::add("resource", rid);
+      });
+      p["levels"].push_back(std::move(l));
+    });
+    out["projects"][std::to_string(id)] = std::move(p);
+  });
+
+  if (trees_p && *trees_p) {
+    for_each_list(*trees_p, [&](Il2CppObject* tree) {
+      nlohmann::json t;
+      auto id    = prop_val<int64_t>(tree, "Id");
+      auto refs  = prop_obj(tree, "IdRefs");
+      auto loca  = refs ? prop_val<int64_t>(refs, "LocaId") : 0;
+      t["name"]    = loca ? localize("research_trees", std::to_string(loca)) : std::string();
+      t["loca"]    = loca;
+      t["type"]    = prop_val<int32_t>(tree, "Type");
+      t["faction"] = prop_val<int64_t>(tree, "FactionId");
+      t["projects"] = nlohmann::json::array();
+      for_each_repeated(prop_obj(tree, "Projects"), [&](Il2CppArray* arr, int32_t i) {
+        t["projects"].push_back(rf_i64(arr, i));
+      });
+      out["trees"][std::to_string(id)] = std::move(t);
+    });
+  }
+
+  if (out["projects"].empty()) {
+    return;   // specs not loaded yet; try again next tick
+  }
+  write_json_file(FILE_DEF_RESEARCH, out);
+  done = true;
+  spdlog::info("Research catalogue: {} projects in {} trees written to {} ({} unnamed)", out["projects"].size(),
+               out["trees"].size(), FILE_DEF_RESEARCH, unnamed);
+}
+
 static void ScreenManager_LateUpdate_Hook(auto original, ScreenManager* _this)
 {
   original(_this);
@@ -963,6 +1083,7 @@ static void ScreenManager_LateUpdate_Hook(auto original, ScreenManager* _this)
   }
   next = now + std::chrono::seconds(3);
   export_fleets();
+  write_research_catalogue();
   write_spec_names();
   write_icon_map();
   if (g_specs_dirty) {
@@ -1030,6 +1151,8 @@ static std::string localize(const std::string& category, const std::string& iden
     variants = {"resource_name_" + identifier, identifier, "resource_name_short_" + identifier};
   } else if (category == "research") {
     variants = {"research_project_name_" + identifier, identifier};
+  } else if (category == "research_trees") {
+    variants = {"research_tree_name_" + identifier, "research_tree_" + identifier, identifier};
   } else if (category == "ships") {
     variants = {"ship_name_" + identifier, "ship_common_name_" + identifier, identifier};
   } else if (category == "ship_components") {
