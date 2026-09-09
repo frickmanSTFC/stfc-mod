@@ -1048,8 +1048,8 @@ static void write_research_catalogue()
     auto loca = refs ? prop_val<int64_t>(refs, "LocaId") : 0;
     p["name"] = loca ? localize("research", std::to_string(loca)) : std::string();
     if (p["name"].get<std::string>().empty()) {
-      ++unnamed;
-      // the 44 nameless ones are the game's own flag nodes (one free instant level); the viewer hides them
+      ++unnamed;   // the game's own flag nodes (one free instant level); the viewer hides them
+    }
     p["levels"] = nlohmann::json::array();
     for_each_repeated(prop_obj(spec, "Levels"), [&](Il2CppArray* arr, int32_t i) {
       auto lvl = rf_obj(arr, i);
