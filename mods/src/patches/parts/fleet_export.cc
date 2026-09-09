@@ -163,6 +163,10 @@ template <typename F> static void for_each_list(Il2CppObject* list, F fn)
 {
   auto items_p = (Il2CppArray**)field_ptr(list, "_items");
   auto size_p  = (int32_t*)field_ptr(list, "_size");
+  if (!items_p) {  // Google.Protobuf RepeatedField<T> keeps the same shape under other names
+    items_p = (Il2CppArray**)field_ptr(list, "array");
+    size_p  = (int32_t*)field_ptr(list, "count");
+  }
   if (!items_p || !*items_p || !size_p) {
     return;
   }
@@ -230,6 +234,7 @@ static double ticks_to_s(int64_t ticks)
 
 static std::string localize(const std::string& category, const std::string& identifier);
 static void        note_hull(int64_t hull_id, const std::string& name);
+static std::string localize_one(const std::string& category, const std::string& identifier);
 static void        note_officer(int64_t spec_id, const std::string& name);
 static void write_image_map();
 static void write_avatar_names();
@@ -974,6 +979,29 @@ template <typename F> static void for_each_repeated(Il2CppObject* rf, F fn)
 static Il2CppObject* rf_obj(Il2CppArray* arr, int32_t i) { return *(Il2CppObject**)il2cpp_array_addr_with_size(arr, i, sizeof(void*)); }
 static int64_t       rf_i64(Il2CppArray* arr, int32_t i) { return *(int64_t*)il2cpp_array_addr_with_size(arr, i, sizeof(int64_t)); }
 
+// Google.Protobuf MapField<long, T>: entries live on a LinkedList<KeyValuePair<long, T>>;
+// each node's inline item is {long key; T value}.
+template <typename F> static void for_each_mapfield(Il2CppObject* map, F fn)
+{
+  auto list_p = (Il2CppObject**)field_ptr(map, "list");
+  auto list   = list_p ? *list_p : nullptr;
+  auto head_p = (Il2CppObject**)field_ptr(list, "head");
+  auto count_p = (int32_t*)field_ptr(list, "count");
+  if (!head_p || !*head_p || !count_p) {
+    return;
+  }
+  auto node = *head_p;
+  for (int32_t i = 0; i < *count_p && node; ++i) {
+    auto item = (char*)field_ptr(node, "item");
+    if (!item) {
+      return;
+    }
+    fn(*(int64_t*)item, *(Il2CppObject**)(item + 8));
+    auto next_p = (Il2CppObject**)field_ptr(node, "next");
+    node        = next_p ? *next_p : nullptr;
+  }
+}
+
 static void write_research_catalogue()
 {
   static bool done = false;
@@ -985,10 +1013,24 @@ static void write_research_catalogue()
   if (!spec_service) {
     return;
   }
-  auto projects_p = (Il2CppObject**)field_ptr(spec_service, "ResearchProjectSpecs");
-  auto trees_p    = (Il2CppObject**)field_ptr(spec_service, "ResearchTreeSpecs");
+  // the spec tables live on SpecService._dataContainer (StaticSyncDataContainer)
+  auto container_p = (Il2CppObject**)field_ptr(spec_service, "_dataContainer");
+  auto container   = container_p ? *container_p : nullptr;
+  auto projects_p  = (Il2CppObject**)field_ptr(container, "ResearchProjectSpecs");
+  auto trees_p     = (Il2CppObject**)field_ptr(container, "ResearchTreeSpecs");
+  static int tries = 0;
   if (!projects_p || !*projects_p) {
+    if (++tries % 20 == 1) {
+      spdlog::warn("Research catalogue: ResearchProjectSpecs {} ({})", projects_p ? "is null" : "field not found",
+                   container ? il2cpp_class_get_name(il2cpp_object_get_class(container)) : "no _dataContainer");
+    }
     return;
+  }
+  if (tries == 0) {
+    auto cls = il2cpp_object_get_class(*projects_p);
+    spdlog::info("Research catalogue: dictionary type {} (namespace {})", il2cpp_class_get_name(cls),
+                 il2cpp_class_get_namespace(cls));
+    tries = 1;
   }
 
   nlohmann::json out;
@@ -996,8 +1038,7 @@ static void write_research_catalogue()
   out["trees"]    = nlohmann::json::object();
   int unnamed = 0;
 
-  for_each_dict_ll(*projects_p, [&](int64_t id, int64_t spec_ptr) {
-    auto spec = (Il2CppObject*)spec_ptr;
+  for_each_mapfield(*projects_p, [&](int64_t id, Il2CppObject* spec) {
     if (!spec) {
       return;
     }
@@ -1008,6 +1049,11 @@ static void write_research_catalogue()
     p["name"] = loca ? localize("research", std::to_string(loca)) : std::string();
     if (p["name"].get<std::string>().empty()) {
       ++unnamed;
+      if (auto ls = refs ? (Il2CppString*)prop_obj(refs, "LocaStringId") : nullptr) {
+        p["loca_str"] = to_string(ls);
+        auto n        = localize("research", p["loca_str"].get<std::string>());
+        if (!n.empty()) { p["name"] = n; --unnamed; }
+      }
     }
     p["levels"] = nlohmann::json::array();
     for_each_repeated(prop_obj(spec, "Levels"), [&](Il2CppArray* arr, int32_t i) {
@@ -1050,8 +1096,21 @@ static void write_research_catalogue()
       auto id    = prop_val<int64_t>(tree, "Id");
       auto refs  = prop_obj(tree, "IdRefs");
       auto loca  = refs ? prop_val<int64_t>(refs, "LocaId") : 0;
-      t["name"]    = loca ? localize("research_trees", std::to_string(loca)) : std::string();
-      t["loca"]    = loca;
+      std::string loca_str;
+      if (auto ls = refs ? (Il2CppString*)prop_obj(refs, "LocaStringId") : nullptr) {
+        loca_str = to_string(ls);
+      }
+      // trees carry a text id; the game's own key is that string, tried in the research table first
+      t["name"] = loca_str.empty() ? std::string() : localize("research", loca_str);
+      if (t["name"].get<std::string>().empty()) {
+        for (const char* cat : {"research_trees", "research_tree", "buckets", "ui"}) {
+          auto n = loca_str.empty() ? std::string() : localize_one(cat, loca_str);
+          if (n.empty() && loca) n = localize_one(cat, "research_tree_name_" + std::to_string(loca));
+          if (!n.empty()) { t["name"] = n; break; }
+        }
+      }
+      t["loca"]     = loca;
+      t["loca_str"] = loca_str;
       t["type"]    = prop_val<int32_t>(tree, "Type");
       t["faction"] = prop_val<int64_t>(tree, "FactionId");
       t["projects"] = nlohmann::json::array();
@@ -1063,6 +1122,9 @@ static void write_research_catalogue()
   }
 
   if (out["projects"].empty()) {
+    if (tries++ % 20 == 1) {
+      spdlog::warn("Research catalogue: MapField walk found nothing (list/head/count missing or empty)");
+    }
     return;   // specs not loaded yet; try again next tick
   }
   write_json_file(FILE_DEF_RESEARCH, out);
