@@ -1131,6 +1131,140 @@ static void write_research_catalogue()
                out["trees"].size(), FILE_DEF_RESEARCH, unnamed);
 }
 
+// --- events -----------------------------------------------------------------------------------
+// Every event the game lists (solo milestone events, dailies, battle pass, achievements...) with its
+// state, timer, points, milestone tiers and objectives. TournamentManager._eventsCache is the list
+// the events screen itself draws from. Written whenever anything in it changes.
+#define FILE_DEF_EVENTS "community_patch_events.json"
+
+static int64_t ticks_to_unix(int64_t ticks)   // .NET DateTime ticks (kind bits masked) -> unix seconds
+{
+  ticks &= 0x3FFFFFFFFFFFFFFFLL;
+  return (ticks - 621355968000000000LL) / 10000000LL;
+}
+
+static Il2CppObject* prop_obj_any(Il2CppObject* obj, std::initializer_list<const char*> names)
+{
+  for (auto n : names) {
+    if (auto r = prop_obj(obj, n)) return r;
+  }
+  return nullptr;
+}
+
+static void write_events()
+{
+  static auto tm_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.Tournaments", "TournamentManager");
+  if (!tm_helper.isValidHelper()) {
+    return;
+  }
+  static auto instance_prop = tm_helper.GetParent("MonoSingleton`1").GetProperty("Instance");
+  auto        mgr           = (Il2CppObject*)instance_prop.GetRaw<void>(nullptr);
+  if (!mgr) {
+    return;
+  }
+  auto list_p = (Il2CppObject**)field_ptr(mgr, "_eventsCache");
+  if (!list_p || !*list_p) {
+    return;
+  }
+
+  static bool    logged_key = false;
+  static int     ticks      = 0;
+  nlohmann::json events     = nlohmann::json::array();
+
+  for_each_list(*list_p, [&](Il2CppObject* ev) {
+    nlohmann::json e;
+    e["id"]   = prop_val<int64_t>(ev, "Id");
+    e["spec"] = prop_val<int64_t>(ev, "SpecId");
+
+    // name: the event's IdRefs sit behind an explicit interface property
+    auto        refs     = prop_obj_any(ev, {"Digit.PrimeServer.Models.IMissionElement.IdRefs", "IdRefs"});
+    const auto  loca     = refs ? prop_val<int64_t>(refs, "LocaId") : 0;
+    std::string loca_str;
+    if (auto ls = refs ? (Il2CppString*)prop_obj(refs, "LocaStringId") : nullptr) {
+      loca_str = to_string(ls);
+    }
+    e["loca"]     = loca;
+    e["loca_str"] = loca_str;
+    e["name"]     = std::string();
+    {
+      const auto lid = std::to_string(loca);
+      for (const char* cat : {"events", "event", "tournaments", "missions", "loca", "buckets"}) {
+        for (const auto& ident : {"event_name_" + lid, "event_title_" + lid, "tournament_name_" + lid, "name_" + lid,
+                                  loca_str, loca_str.empty() ? std::string() : "event_name_" + loca_str, lid}) {
+          if (ident.empty()) continue;
+          auto n = localize_one(cat, ident);
+          if (!n.empty()) {
+            e["name"] = n;
+            if (!logged_key) { spdlog::info("Events: name key shape is {}/{}", cat, ident); logged_key = true; }
+            break;
+          }
+        }
+        if (!e["name"].get<std::string>().empty()) break;
+      }
+    }
+
+    for (const char* f : {"IsCurrentlyActive", "IsActive", "IsComplete", "IsClaimable", "IsClosed", "IsReady",
+                          "IsDailyGoalsEvent", "IsDailyMilestone", "IsBattlePass", "IsAchievement", "IsWarchestEvent",
+                          "IsMilestoneProgression", "IsRankProgression", "IsProgressionReward", "IsArchived"}) {
+      e[f] = prop_val<bool>(ev, f);
+    }
+    e["points"]         = prop_val<int32_t>(ev, "PointsAccumulated");
+    e["milestone"]      = prop_val<int32_t>(ev, "MilestoneIndex");
+    e["milestones"]     = prop_val<int32_t>(ev, "MaxMilestoneIndex");
+    e["points_left"]    = prop_val<int64_t>(ev, "PointsRemainingToCompleteAllMilestones");
+    e["state"]          = prop_val<int32_t>(ev, "State");
+    if (auto pr = prop_obj(ev, "ProgressToNextMilestone")) {
+      e["next"] = {{"cur", prop_val<double>(pr, "CurrentValue")}, {"max", prop_val<double>(pr, "MaxValue")}};
+    }
+    if (auto t = prop_obj_any(ev, {"Timer", "ExpiryTimer"})) {
+      // RemainingTime / DueTime come back boxed; ticks are the first field of both structs
+      e["remaining_s"] = prop_val<int64_t>(t, "RemainingTime") / 10000000LL;
+      e["due"]         = ticks_to_unix(prop_val<int64_t>(t, "DueTime"));
+      e["start"]       = ticks_to_unix(prop_val<int64_t>(t, "StartTime"));
+    }
+
+    e["tiers"] = nlohmann::json::array();
+    for_each_list(prop_obj(ev, "Tiers"), [&](Il2CppObject* tier) {
+      nlohmann::json t;
+      t["score"] = prop_val<int64_t>(tier, "HighScore");
+      t["state"] = prop_val<int32_t>(tier, "CurrentState");   // 0 inactive 1 active 2 ready to collect 3 complete
+      if (auto pr = prop_obj(tier, "Progress")) {
+        t["cur"] = prop_val<double>(pr, "CurrentValue");
+        t["max"] = prop_val<double>(pr, "MaxValue");
+      }
+      e["tiers"].push_back(std::move(t));
+    });
+
+    e["objectives"] = nlohmann::json::array();
+    for_each_list(prop_obj(ev, "Objectives"), [&](Il2CppObject* o) {
+      nlohmann::json j;
+      j["id"]        = prop_val<int64_t>(o, "Id");
+      j["type"]      = prop_val<int32_t>(o, "Type");
+      j["cur"]       = prop_val<int64_t>(o, "CurrentCounterValue");
+      j["target"]    = prop_val<int64_t>(o, "TargetCounterValue");
+      j["claimable"] = prop_val<bool>(o, "IsClaimable");
+      j["spec"]      = prop_val<int64_t>(o, "ObjectiveSpecId");
+      e["objectives"].push_back(std::move(j));
+    });
+
+    events.push_back(std::move(e));
+  });
+
+  nlohmann::json out = {{"updated", std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::system_clock::now().time_since_epoch()).count()},
+                        {"events", events}};
+  static std::string last;
+  auto               body = events.dump();
+  if (body == last) {
+    return;
+  }
+  last = body;
+  write_json_file(FILE_DEF_EVENTS, out);
+  if (ticks++ % 100 == 0) {
+    spdlog::info("Events: {} events written to {}", events.size(), FILE_DEF_EVENTS);
+  }
+}
+
 static void ScreenManager_LateUpdate_Hook(auto original, ScreenManager* _this)
 {
   original(_this);
@@ -1144,6 +1278,7 @@ static void ScreenManager_LateUpdate_Hook(auto original, ScreenManager* _this)
   next = now + std::chrono::seconds(3);
   export_fleets();
   write_research_catalogue();
+  write_events();
   write_spec_names();
   write_icon_map();
   if (g_specs_dirty) {
