@@ -1049,23 +1049,7 @@ static void write_research_catalogue()
     p["name"] = loca ? localize("research", std::to_string(loca)) : std::string();
     if (p["name"].get<std::string>().empty()) {
       ++unnamed;
-      // faction store and challenge projects answer to some other key; search once, log the shape
-      static bool logged_p = false;
-      const auto  lid      = std::to_string(loca);
-      for (const char* cat : {"research", "factions", "store", "store_groups", "bundles", "buckets", "inventory", "materials", "events"}) {
-        for (const auto& ident : {"research_project_name_" + lid, "faction_research_name_" + lid, "faction_store_research_" + lid,
-                                  "research_name_" + lid, "store_research_" + lid, "bundle_name_" + lid, "event_name_" + lid, lid}) {
-          if (ident == lid && std::string(cat) == "research") continue;   // bare number in research = wrong project
-          auto n = localize_one(cat, ident);
-          if (!n.empty()) {
-            p["name"] = n; --unnamed;
-            if (!logged_p) { spdlog::info("Research catalogue: unnamed project key shape is {}/{}", cat, ident); logged_p = true; }
-            break;
-          }
-        }
-        if (!p["name"].get<std::string>().empty()) break;
-      }
-    }
+      // the 44 nameless ones are the game's own flag nodes (one free instant level); the viewer hides them
     p["levels"] = nlohmann::json::array();
     for_each_repeated(prop_obj(spec, "Levels"), [&](Il2CppArray* arr, int32_t i) {
       auto lvl = rf_obj(arr, i);
