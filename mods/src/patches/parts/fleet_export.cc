@@ -1245,8 +1245,10 @@ static void write_events()
       std::vector<std::string> cats(loca_cats);
       for (const char* c : {"events", "event", "tournaments", "missions", "loca"}) cats.push_back(c);
       for (const auto& cat : cats) {
-        for (const auto& ident : {"event_name_" + lid, "event_title_" + lid, "tournament_name_" + lid, "name_" + lid,
-                                  loca_str, loca_str.empty() ? std::string() : "event_name_" + loca_str, lid}) {
+        // the id is a 40-char content hash; the text key is most likely hash + a suffix
+        for (const auto& ident : {loca_str + "_name", loca_str + "_title", loca_str + "-name", loca_str + ".name",
+                                  "name_" + loca_str, "title_" + loca_str, loca_str + "_event_name", loca_str + "_short_name",
+                                  "event_name_" + loca_str, loca_str, "event_name_" + lid, lid}) {
           if (ident.empty()) continue;
           auto n = localize_one(cat, ident);
           if (!n.empty()) {
@@ -1292,8 +1294,25 @@ static void write_events()
     });
 
     e["objectives"] = nlohmann::json::array();
+    static bool logged_obj = false;
     for_each_list(prop_obj(ev, "Objectives"), [&](Il2CppObject* o) {
       nlohmann::json j;
+      if (!logged_obj) {   // learn what an event objective really is, once
+        auto cls = il2cpp_object_get_class(o);
+        std::string props;
+        void* iter = nullptr;
+        while (auto pr = il2cpp_class_get_properties(cls, &iter)) {
+          props += il2cpp_property_get_name((PropertyInfo*)pr); props += " ";
+        }
+        spdlog::info("Events: objective class {}.{} props [{}]", il2cpp_class_get_namespace(cls), il2cpp_class_get_name(cls), props);
+        logged_obj = true;
+      }
+      if (auto pr = prop_obj(o, "Progress")) {
+        j["pcur"] = prop_val<double>(pr, "CurrentValue");
+        j["pmax"] = prop_val<double>(pr, "MaxValue");
+      }
+      j["value"]  = prop_val<double>(o, "CurrentValue");
+      j["tvalue"] = prop_val<double>(o, "TargetValue");
       j["id"]        = prop_val<int64_t>(o, "Id");
       j["type"]      = prop_val<int32_t>(o, "Type");
       j["cur"]       = prop_val<int64_t>(o, "CurrentCounterValue");
