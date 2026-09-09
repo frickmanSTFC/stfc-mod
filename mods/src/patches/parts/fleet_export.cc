@@ -1097,7 +1097,8 @@ static void write_research_catalogue()
       }
       // Tree names sit in the research table as research_tree_name_<LocaId> (found 2026-09-08).
       // A bare number is never tried there: it answers with some project's name.
-      t["name"] = loca ? localize_one("research", "research_tree_name_" + std::to_string(loca)) : std::string();
+      // LocaId 0 is a real id here (it is the Station tree), so no "is it set" check
+      t["name"] = localize_one("research", "research_tree_name_" + std::to_string(loca));
       // fleet commander trees point at the commander, an officer entity (EntityType.Officers)
       const auto etype = prop_val<int32_t>(tree, "EntityType");
       const auto eid   = prop_val<int64_t>(tree, "EntityId");
