@@ -1049,10 +1049,21 @@ static void write_research_catalogue()
     p["name"] = loca ? localize("research", std::to_string(loca)) : std::string();
     if (p["name"].get<std::string>().empty()) {
       ++unnamed;
-      if (auto ls = refs ? (Il2CppString*)prop_obj(refs, "LocaStringId") : nullptr) {
-        p["loca_str"] = to_string(ls);
-        auto n        = localize("research", p["loca_str"].get<std::string>());
-        if (!n.empty()) { p["name"] = n; --unnamed; }
+      // faction store and challenge projects answer to some other key; search once, log the shape
+      static bool logged_p = false;
+      const auto  lid      = std::to_string(loca);
+      for (const char* cat : {"research", "factions", "store", "store_groups", "bundles", "buckets", "inventory", "materials", "events"}) {
+        for (const auto& ident : {"research_project_name_" + lid, "faction_research_name_" + lid, "faction_store_research_" + lid,
+                                  "research_name_" + lid, "store_research_" + lid, "bundle_name_" + lid, "event_name_" + lid, lid}) {
+          if (ident == lid && std::string(cat) == "research") continue;   // bare number in research = wrong project
+          auto n = localize_one(cat, ident);
+          if (!n.empty()) {
+            p["name"] = n; --unnamed;
+            if (!logged_p) { spdlog::info("Research catalogue: unnamed project key shape is {}/{}", cat, ident); logged_p = true; }
+            break;
+          }
+        }
+        if (!p["name"].get<std::string>().empty()) break;
       }
     }
     p["levels"] = nlohmann::json::array();
@@ -1103,10 +1114,18 @@ static void write_research_catalogue()
       // Tree names sit in the research table as research_tree_name_<LocaId> (found 2026-09-08).
       // A bare number is never tried there: it answers with some project's name.
       t["name"] = loca ? localize_one("research", "research_tree_name_" + std::to_string(loca)) : std::string();
+      // fleet commander trees point at the commander, an officer entity (EntityType.Officers)
+      const auto etype = prop_val<int32_t>(tree, "EntityType");
+      const auto eid   = prop_val<int64_t>(tree, "EntityId");
+      if (etype == 1211023646 && eid) {
+        t["officer"] = eid;
+        spec_ids::add("officer", eid);   // name lands in community_patch_specs.json under "officer"
+      }
       t["loca"]     = loca;
       t["loca_str"] = loca_str;
       t["type"]    = prop_val<int32_t>(tree, "Type");
       t["faction"] = prop_val<int64_t>(tree, "FactionId");
+      if (t["faction"].get<int64_t>() > 0) spec_ids::add("faction", t["faction"].get<int64_t>());
       t["projects"] = nlohmann::json::array();
       for_each_repeated(prop_obj(tree, "Projects"), [&](Il2CppArray* arr, int32_t i) {
         t["projects"].push_back(rf_i64(arr, i));
