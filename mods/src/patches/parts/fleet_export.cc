@@ -111,6 +111,27 @@ static void* spec_service_for(FleetsManager* manager)
   return spec_service ? spec_service : *(void**)cache_ptr;
 }
 
+// Any CachedService<T> field: call its get_Service so it resolves, then read the pointer.
+static Il2CppObject* cached_service(Il2CppObject* owner, const char* field)
+{
+  if (!owner) {
+    return nullptr;
+  }
+  auto fi = il2cpp_class_get_field_from_name(il2cpp_object_get_class(owner), field);
+  if (!fi) {
+    return nullptr;
+  }
+  auto cache_ptr = (char*)owner + il2cpp_field_get_offset(fi);
+  auto cls       = il2cpp_class_from_type(il2cpp_field_get_type(fi));
+  auto getter    = cls ? il2cpp_class_get_method_from_name(cls, "get_Service", 0) : nullptr;
+  if (getter) {
+    Il2CppException* ex = nullptr;
+    auto             r  = il2cpp_runtime_invoke(getter, cache_ptr, nullptr, &ex);
+    if (!ex && r) return r;
+  }
+  return *(Il2CppObject**)cache_ptr;
+}
+
 static ResourceInfo resource_info(FleetsManager* manager, int64_t resource_id)
 {
   static std::unordered_map<int64_t, ResourceInfo> cache;
@@ -1162,16 +1183,49 @@ static void write_events()
   if (!mgr) {
     return;
   }
-  auto list_p = (Il2CppObject**)field_ptr(mgr, "_eventsCache");
-  if (!list_p || !*list_p) {
+  // TournamentManager -> TournamentService -> _dataContainer._index: one List<EventModel> per category
+  auto svc = cached_service(mgr, "_tournamentServiceCached");
+  auto dc_p = (Il2CppObject**)field_ptr(svc, "_dataContainer");
+  auto dc   = dc_p ? *dc_p : nullptr;
+  auto idx_p = (Il2CppArray**)field_ptr(dc, "_index");
+  static int tries = 0;
+  if (!idx_p || !*idx_p) {
+    if (tries++ % 100 == 0) {
+      spdlog::warn("Events: no data container ({} {} {})", svc ? "service" : "no service", dc ? "container" : "no container",
+                   idx_p ? "index null" : "no index field");
+    }
     return;
+  }
+  // the container also names the translation tables events use; log them once
+  static std::vector<std::string> loca_cats;
+  if (loca_cats.empty()) {
+    if (auto lc_p = (Il2CppArray**)field_ptr(dc, "_locaCategories"); lc_p && *lc_p) {
+      auto n = il2cpp_array_length(*lc_p);
+      for (uint32_t i = 0; i < n; ++i) {
+        if (auto str = *(Il2CppString**)il2cpp_array_addr_with_size(*lc_p, i, sizeof(void*))) loca_cats.push_back(to_string(str));
+      }
+      std::string all;
+      for (auto& c : loca_cats) all += c + " ";
+      spdlog::info("Events: loca categories [{}]", all);
+    }
   }
 
   static bool    logged_key = false;
   static int     ticks      = 0;
   nlohmann::json events     = nlohmann::json::array();
 
-  for_each_list(*list_p, [&](Il2CppObject* ev) {
+  std::vector<Il2CppObject*> lists;
+  {
+    auto n = il2cpp_array_length(*idx_p);
+    for (uint32_t i = 0; i < n; ++i) {
+      if (auto l = *(Il2CppObject**)il2cpp_array_addr_with_size(*idx_p, i, sizeof(void*))) lists.push_back(l);
+    }
+  }
+  std::set<int64_t> seen;
+  auto handle = [&](Il2CppObject* ev) {
+    if (!seen.insert(prop_val<int64_t>(ev, "Id")).second) {
+      return;   // the same event can sit in more than one category list
+    }
     nlohmann::json e;
     e["id"]   = prop_val<int64_t>(ev, "Id");
     e["spec"] = prop_val<int64_t>(ev, "SpecId");
@@ -1188,7 +1242,9 @@ static void write_events()
     e["name"]     = std::string();
     {
       const auto lid = std::to_string(loca);
-      for (const char* cat : {"events", "event", "tournaments", "missions", "loca", "buckets"}) {
+      std::vector<std::string> cats(loca_cats);
+      for (const char* c : {"events", "event", "tournaments", "missions", "loca"}) cats.push_back(c);
+      for (const auto& cat : cats) {
         for (const auto& ident : {"event_name_" + lid, "event_title_" + lid, "tournament_name_" + lid, "name_" + lid,
                                   loca_str, loca_str.empty() ? std::string() : "event_name_" + loca_str, lid}) {
           if (ident.empty()) continue;
@@ -1248,7 +1304,10 @@ static void write_events()
     });
 
     events.push_back(std::move(e));
-  });
+  };
+  for (auto l : lists) {
+    for_each_list(l, handle);
+  }
 
   nlohmann::json out = {{"updated", std::chrono::duration_cast<std::chrono::seconds>(
                                         std::chrono::system_clock::now().time_since_epoch()).count()},
