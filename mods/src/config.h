@@ -116,6 +116,18 @@ enum class InstantWarpConfirmation {
   Jump,
 };
 
+enum class FleetLabelDetail {
+  Native,
+  Expanded,
+  Compact,
+  Threshold,
+};
+
+struct FleetLabelProfile {
+  FleetLabelDetail detail;
+  float            zoom_threshold;
+};
+
 // Part of UI Scale
 void ApplyUiShipScaleToLoadedShips(float old_multiplier, float new_multiplier);
 
@@ -153,6 +165,8 @@ public:
   float ui_scale_viewer;
   float zoom;
   float fr_scale;
+  FleetLabelProfile zoom_label_player;
+  FleetLabelProfile zoom_label_non_player;
   bool  allow_cursor;
   bool  free_resize;
   bool  adjust_scale_res;
@@ -183,20 +197,41 @@ public:
   std::vector<int> disabled_banner_types;
   std::vector<int> notify_banner_types;
 
+  int  extend_chest_purchase_max;
   int  extend_donation_max;
   bool extend_donation_slider;
   bool disable_move_keys;
   bool disable_preview_locate;
   bool disable_preview_recall;
   bool disable_escape_exit;
+  int  disable_escape_exit_timer;
   bool disable_galaxy_chat;
   bool disable_veil_chat;
   bool disable_first_popup;
   bool disable_toast_banners;
+  bool trace_audio_events;
+  std::vector<std::string> disabled_audio_events;
   bool auto_open_bulk_claim_flyout;
   bool auto_confirm_ft_upgrade;
 
+  std::vector<std::string> daily_bulk_claim_factions;
+
+  bool daily_bulk_claim_toggle_default_on;
+
   InstantWarpConfirmation auto_confirm_instant_warp;
+
+  std::vector<std::string> instant_warp_auto_jump;
+  std::vector<std::string> instant_warp_auto_warp;
+  bool                     instant_warp_auto_jump_all = false;
+  bool                     instant_warp_auto_warp_all = false;
+
+  std::vector<std::string> instant_warp_always_ask;
+  bool                     instant_warp_always_ask_all = false;
+
+  std::vector<std::string> pinned_ships;
+
+  bool double_click_to_assign_ship;
+  bool arrow_keys_to_select_ship;
 
   bool show_cargo_default;
   bool show_player_cargo;
@@ -234,8 +269,10 @@ public:
   bool installGameVersionHook;
   bool installObjectTracker;
   bool installGiftsBulkClaimHooks;
+  bool installDailyFactionBulkClaimHooks;
   bool installInstantWarpConfirmationHooks;
   bool installFleetExportHooks;
+  bool installAudioEventHooks;
 
   std::string config_settings_url;
   std::string config_assets_url_override;
@@ -258,4 +295,7 @@ public:
 
   // Officer roster/assignment "Below Deck Ability" sort option restore
   bool installOfficerSortHooks;
+
+  // Fleet management dock ship sort: pin configured ships to the front
+  bool installPinnedShipSortHooks;
 };
