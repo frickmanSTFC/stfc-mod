@@ -2687,6 +2687,21 @@ message StarbaseModuleInfo {
   int64 level = 2;
 }
 
+message PlayerShipData {
+  int64 id = 1;
+  int32 tier = 2;
+  int64 hullId = 3;
+  repeated int64 components = 4;
+  int32 level = 5;
+  float levelPercentage = 6;
+  float damage = 7;
+  float shieldDamage = 8;
+}
+
+message PlayerShipsResponse {
+  map<int64, PlayerShipData> ships = 1;
+}
+
 message StarbaseModulesResponse {
   repeated StarbaseModuleInfo moduleStates = 1;
 }

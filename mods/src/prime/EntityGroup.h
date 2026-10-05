@@ -251,6 +251,7 @@ public:
     StarbaseModules                          = 239,   // 0x000000EF
     ResourceProducers                        = 240,   // 0x000000F0
     Starbase                                 = 241,   // 0x000000F1
+    Ships                                    = 251,   // 0x000000FB
     OutpostStaticData                        = 8401,  // 0x000020D1
     OutpostUpgradeResponse                   = 8402,  // 0x000020D2
     OutpostSync                              = 8403,  // 0x000020D3

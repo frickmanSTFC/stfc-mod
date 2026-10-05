@@ -2045,6 +2045,99 @@ static void active_officer_traits(std::unique_ptr<std::string>&& bytes)
   }
 }
 
+// One ship as the server reports it. Reached two ways: the old JSON "ships" section and, since the
+// server moved it (milestones stopped on 2026-09-28), the protobuf EntityGroup Type::Ships.
+struct ShipRow {
+  int64_t              id;
+  int32_t              tier;
+  int32_t              level;
+  double_t             level_percentage;
+  int64_t              hull_id;
+  std::vector<int64_t> components;
+};
+
+static void apply_ships(const std::vector<ShipRow>& rows)
+{
+  using json = nlohmann::json;
+  using trackers::types::ShipState;
+
+  static std::unordered_map<int64_t, ShipState> ship_states;
+  static std::mutex                             ship_states_mtx;
+  static std::atomic_bool                       is_first_sync{true};
+
+  auto ship_array = json::array();
+  {
+    std::scoped_lock lk(ship_states_mtx);
+
+    for (const auto& r : rows) {
+      const auto id = r.id, hull_id = r.hull_id;
+      const auto tier = r.tier, level = r.level;
+      const auto level_percentage = r.level_percentage;
+      const auto& components = r.components;
+      const ShipState state{tier, level, level_percentage, components};
+
+      // Milestones track tier and level only: ShipState also carries level_percentage, which
+      // moves with every scrap of ship xp, and it keeps its fields private.
+      static std::unordered_map<int64_t, std::pair<int32_t, int32_t>> ship_marks;
+      const auto& mark = ship_marks.find(id);
+      if (mark == ship_marks.end() || mark->second.first != tier) {
+        milestones::record("ship_tier", id, tier);
+      }
+      if (mark == ship_marks.end() || mark->second.second != level) {
+        milestones::record("ship_level", id, level);
+      }
+      ship_marks[id] = {tier, level};
+      static std::unordered_set<int64_t> hull_marked;
+      if (hull_marked.insert(id).second) {
+        milestones::record("ship_hull", id, hull_id);
+      }
+
+      // Fitted modules. Written whole so the viewer can diff one reading against the next and
+      // name the module that changed; the first reading of a ship is only a starting point.
+      static std::unordered_map<int64_t, std::vector<int64_t>> component_marks;
+      if (const auto& cm = component_marks.find(id); cm == component_marks.end() || cm->second != components) {
+        component_marks[id] = components;
+        milestones::record_json("ship_components", id, components);
+      }
+
+      if (const auto& it = ship_states.find(id); it == ship_states.end() || it->second != state) {
+        ship_states[id] = state;
+        ship_array.push_back({{"type", SyncConfig::Type::Ships},
+                              {"psid", id},
+                              {"level", level},
+                              {"level_percentage", level_percentage},
+                              {"tier", tier},
+                              {"hull_id", hull_id},
+                              {"components", components}});
+      }
+    }
+  }
+
+  const bool first_sync = is_first_sync.exchange(false, std::memory_order_acq_rel);
+  if (!ship_array.empty() && Config::Get().sync_options.ships) {
+    workers::queue_data(SyncConfig::Type::Ships, ship_array, first_sync);
+  }
+}
+
+// The server now sends the player's ships as protobuf (EntityGroup Type::Ships) instead of in the JSON blob.
+static void ships_proto(std::unique_ptr<std::string>&& bytes)
+{
+  if (auto response = Digit::PrimeServer::Models::PlayerShipsResponse(); response.ParseFromString(*bytes)) {
+    std::vector<ShipRow> rows;
+    for (const auto& [id, ship] : response.ships()) {
+      rows.push_back({ship.id() ? ship.id() : id, ship.tier(), ship.level(), static_cast<double_t>(ship.levelpercentage()),
+                      ship.hullid(), std::vector<int64_t>(ship.components().begin(), ship.components().end())});
+    }
+    static std::atomic_bool logged{false};
+    if (!logged.exchange(true)) {
+      spdlog::info("Ships payload (protobuf): {} ships; milestone log is fed from it", rows.size());
+    }
+    apply_ships(rows);
+  } else {
+    spdlog::warn("Ships payload (protobuf) could not be parsed ({} bytes)", bytes->size());
+  }
+}
+
 namespace json
 {
   static void battle_result_headers(const nlohmann::json& section)
@@ -2152,68 +2245,15 @@ namespace json
 
   static void ships(const nlohmann::json& section)
   {
-    using json = nlohmann::json;
-    using trackers::types::ShipState;
-
-    static std::unordered_map<int64_t, ShipState> ship_states;
-    static std::mutex                             ship_states_mtx;
-    static std::atomic_bool                       is_first_sync{true};
-
     http::logging::trace("PROCESS", "ships", STR_FORMAT("Processing {} ships (JSON)", section.size()));
 
-    auto ship_array = json::array();
-    {
-      std::scoped_lock lk(ship_states_mtx);
-
-      for (const auto& ship : section.get<json::object_t>() | std::views::values) {
-        const auto      id               = ship["id"].get<int64_t>();
-        const auto      tier             = ship["tier"].get<int32_t>();
-        const auto      level            = ship["level"].get<int32_t>();
-        const auto      level_percentage = ship["level_percentage"].get<double_t>();
-        const auto      components       = ship["components"].get<std::vector<int64_t>>();
-        const ShipState state{tier, level, level_percentage, components};
-
-        // Milestones track tier and level only: ShipState also carries level_percentage, which
-        // moves with every scrap of ship xp, and it keeps its fields private.
-        static std::unordered_map<int64_t, std::pair<int32_t, int32_t>> ship_marks;
-        const auto& mark = ship_marks.find(id);
-        if (mark == ship_marks.end() || mark->second.first != tier) {
-          milestones::record("ship_tier", id, tier);
-        }
-        if (mark == ship_marks.end() || mark->second.second != level) {
-          milestones::record("ship_level", id, level);
-        }
-        ship_marks[id] = {tier, level};
-        static std::unordered_set<int64_t> hull_marked;
-        if (hull_marked.insert(id).second) {
-          milestones::record("ship_hull", id, ship["hull_id"].get<int64_t>());
-        }
-
-        // Fitted modules. Written whole so the viewer can diff one reading against the next and
-        // name the module that changed; the first reading of a ship is only a starting point.
-        static std::unordered_map<int64_t, std::vector<int64_t>> component_marks;
-        if (const auto& cm = component_marks.find(id); cm == component_marks.end() || cm->second != components) {
-          component_marks[id] = components;
-          milestones::record_json("ship_components", id, components);
-        }
-
-        if (const auto& it = ship_states.find(id); it == ship_states.end() || it->second != state) {
-          ship_states[id] = state;
-          ship_array.push_back({{"type", SyncConfig::Type::Ships},
-                                {"psid", id},
-                                {"level", level},
-                                {"level_percentage", level_percentage},
-                                {"tier", tier},
-                                {"hull_id", ship["hull_id"].get<int64_t>()},
-                                {"components", components}});
-        }
-      }
+    std::vector<ShipRow> rows;
+    for (const auto& ship : section.get<nlohmann::json::object_t>() | std::views::values) {
+      rows.push_back({ship["id"].get<int64_t>(), ship["tier"].get<int32_t>(), ship["level"].get<int32_t>(),
+                      ship["level_percentage"].get<double_t>(), ship["hull_id"].get<int64_t>(),
+                      ship["components"].get<std::vector<int64_t>>()});
     }
-
-    const bool first_sync = is_first_sync.exchange(false, std::memory_order_acq_rel);
-    if (!ship_array.empty() && Config::Get().sync_options.ships) {
-      workers::queue_data(SyncConfig::Type::Ships, ship_array, first_sync);
-    }
+    apply_ships(rows);
   }
 
   static void parse(std::unique_ptr<std::string>&& bytes)
@@ -2496,7 +2536,10 @@ static void HandleEntityGroup(EntityGroup* entity_group)
       break;
 
     // ships
-    // TODO: currently still part of JSON, likely to change in the future
+    case EntityGroup::Type::Ships:
+      // always processed: the local milestone log does not depend on the sync upload being enabled
+      submit_async(processors::ships_proto);
+      break;
 
     // slots
     case EntityGroup::Type::EntitySlots:
